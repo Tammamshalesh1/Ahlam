@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تطبيق دردشة صوتية ولايف</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }
+        #chat-container { max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        #messages { height: 200px; overflow-y: auto; border: 1px solid #ccc; margin-bottom: 10px; padding: 10px; text-align: right; background: #fafafa; }
+        input, button { padding: 10px; font-size: 16px; margin: 5px; border-radius: 5px; border: 1px solid #ccc; }
+        button { background: #007bff; color: white; cursor: pointer; border: none; }
+        button:hover { background: #0056b3; }
+        #users-list { margin-top: 15px; font-weight: bold; color: green; }
+    </style>
+</head>
+<body>
+
+    <div id="chat-container">
+        <h2>دردشة صوتية ونصية لايف</h2>
+        
+        <!-- قسم تسجيل الدخول بالـ ID -->
+        <div id="login-section">
+            <input type="text" id="userIdInput" placeholder="أدخل الـ ID الخاص بك هنا...">
+            <button onclick="startApp()">دخول الغرفة</button>
+        </div>
+
+        <!-- قسم الشات والصوت (يظهر بعد الدخول) -->
+        <div id="app-section" style="display:none;">
+            <p>مرحباً بك: <span id="myIdDisplay" style="color:blue;"></span></p>
+            <div id="users-list">المستخدمون المتصلون بالصوت حالياً...</div>
+            
+            <div id="messages"></div>
+            <input type="text" id="messageInput" placeholder="اكتب رسالة...">
+            <button onclick="sendMessage()">إرسال</button>
+        </div>
+    </div>
+
+    <!-- جلب مكتبة الـ Socket.io والمكتبة المساعدة لـ WebRTC -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cloudflare.com"></script>
+
+    <script>
+        const socket = io();
+        let localStream;
+        let peers = {};
+        let myUserId = "";
+
+        async function startApp() {
+            myUserId = document.getElementById('userIdInput').value.trim();
+            if (!myUserId) return alert("الرجاء إدخال ID أولاً!");
+
+            // 1. طلب صلاحية الميكروفون لبث الصوت
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                document.getElementById('login-section').style.display = 'none';
+                document.getElementById('app-section').style.display = 'block';
+                document.getElementById('myIdDisplay').innerText = myUserId;
+
+                // 2. إرسال الـ ID للسيرفر للانضمام
+                socket.emit('join-room', myUserId);
+            } catch (err) {
+                alert("فشل الوصول للميكروفون. تأكد من إعطاء الصلاحية.");
+                console.error(err);
+            }
+        }
+
+        // عند اتصال مستخدم جديد: ننشئ اتصال صوتي معه (Offer)
+        socket.on('user-connected', (remoteUserId, remoteSocketId) => {
+            appendMessage(`📢 انضم المستخدم ذو المعرف (${remoteUserId}) للدردشة`);
+            
+            const peer = new SimplePeer({ initiator: true, trickle: false, stream: localStream });
+            
+            peer.on('signal', signal => {
+                socket.emit('signal', { toSocketId: remoteSocketId, signal: signal });
+            });
+
+            peer.on('stream', stream => {
+                playRemoteStream(stream, remoteSocketId);
+            });
+
+            peers[remoteSocketId] = peer;
+        </script>
+        <script>
+        // تكملة السكربت البرمجي للتعامل مع الردود والإشارات النصية والصوتية
+        socket.on('signal', (data) => {
+            let peer = peers[data.fromSocketId];
+            if (!peer) {
+                // استقبال اتصال من مستخدم جديد (Answer)
+                peer = new SimplePeer({ initiator: false, trickle: false, stream: localStream });
+                
+                peer.on('signal', signal => {
+                    socket.emit('signal', { toSocketId: data.fromSocketId, signal: signal });
+                });
+
+                peer.on('stream', stream => {
+                    playRemoteStream(stream, data.fromSocketId);
+                });
+
+                peers[data.fromSocketId] = peer;
+            }
+            peer.signal(data.signal);
+        });
+
+        // تشغيل صوت الطرف الآخر فور استقبال البث
+        function playRemoteStream(stream, socketId) {
+            let audio = document.getElementById('audio-' + socketId);
+            if (!audio) {
+                audio = document.createElement('audio');
+                audio.id = 'audio-' + socketId;
+                audio.autoplay = true;
+                document.body.appendChild(audio);
+            }
+            audio.srcObject = stream;
+            document.getElementById('users-list').innerText = "جاري بث الصوت لايف بين الأطراف المتصلة 🎙️";
+        }
+
+        // إرسال الرسائل النصية الشات
+        function sendMessage() {
+            const msgInput = document.getElementById('messageInput');
+            const text = msgInput.value.trim();
+            if(text) {
+                socket.emit('send-message', { user: myUserId, text: text });
+                msgInput.value = "";
+            }
+        }
+
+        // استقبال وعرض الرسائل النصية
+        socket.on('receive-message', (data) => {
+            appendMessage(`<b>${data.user}:</b> ${data.text}`);
+        });
+
+        // عند مغادرة مستخدم
+        socket.on('user-disconnected', (socketId) => {
+            if (peers[socketId]) peers[socketId].destroy();
+            delete peers[socketId];
+            const audioEl = document.getElementById('audio-' + socketId);
+            if (audioEl) audioEl.remove();
+        });
+
+        function appendMessage(htmlContent) {
+            const msgDiv = document.getElementById('messages');
+            msgDiv.innerHTML += `<div>${htmlContent}</div>`;
+            msgDiv.scrollTop = msgDiv.scrollHeight;
+        }
+    </script>
+</body>
+</html>
